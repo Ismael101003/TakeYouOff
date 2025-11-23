@@ -3,29 +3,122 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Opti-Ruta Sky | PoliHacks</title>
+    <title>TakeYouOff | Sky Monitoring</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         #map { height: 500px; border-radius: 8px; }
         .card { border-radius: 10px; }
         .form-control-sm { margin-bottom: 5px; }
+        
+        /* Toast Notification Styles */
+        .toast-container-custom {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-width: 400px;
+        }
+        
+        .toast-item {
+            background: white;
+            border-left: 4px solid #dc3545;
+            border-radius: 4px;
+            padding: 16px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: slideIn 0.3s ease-out;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+        
+        .toast-item.warning {
+            border-left-color: #ff9800;
+        }
+        
+        .toast-item.danger {
+            border-left-color: #dc3545;
+        }
+        
+        .toast-item.info {
+            border-left-color: #0d6efd;
+        }
+        
+        .toast-icon {
+            font-size: 24px;
+            flex-shrink: 0;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .toast-danger .toast-icon { color: #dc3545; }
+        .toast-warning .toast-icon { color: #ff9800; }
+        .toast-info .toast-icon { color: #0d6efd; }
+        
+        .toast-content {
+            flex: 1;
+        }
+        
+        .toast-title {
+            font-weight: bold;
+            margin-bottom: 4px;
+            font-size: 14px;
+        }
+        
+        .toast-message {
+            font-size: 13px;
+            color: #666;
+        }
+        
+        .toast-close {
+            background: none;
+            border: none;
+            color: #999;
+            cursor: pointer;
+            font-size: 20px;
+            padding: 0;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .toast-close:hover {
+            color: #333;
+        }
+        
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
     </style>
 </head>
 <body class="bg-light">
 
     <nav class="navbar navbar-dark bg-dark shadow-sm mb-4">
         <div class="container-fluid">
-            <a class="navbar-brand ms-2" href="#">✈️ Opti-Ruta Sky</a>
-            <span class="navbar-text text-white-50">Simulación Matemática | Wolfram Engine</span>
+            <a class="navbar-brand ms-2" href="#">✈️ TakeYouOff</a>
+            <span class="navbar-text text-white-50">Sky Monitoring | OpenSky + IA</span>
         </div>
     </nav>
 
-    <div class="container-fluid">
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container-custom"></div>
 
-        <div id="alerta-banner" class="alert alert-danger text-center fw-bold fs-5 shadow hidden" role="alert" style="display:none;">
-            🚨 ¡ALERTA CRÍTICA! Simulación proyecta conflicto en ruta. (ElevenLabs Audio Placeholder)
-        </div>
+    <div class="container-fluid">
 
         <div class="row">
             
@@ -50,6 +143,16 @@
 
                             <button type="submit" class="btn btn-primary w-100 fw-bold">Calcular Ruta Óptima</button>
                         </form>
+
+                        <!-- OpenSky Monitoring Section -->
+                        <hr class="my-4">
+                        <h6 class="fw-bold">📡 Monitoreo OpenSky (CDMX)</h6>
+                        <button id="btn-start-monitoring" class="btn btn-info w-100 mb-2">Iniciar Monitoreo</button>
+                        <button id="btn-stop-monitoring" class="btn btn-secondary w-100 mb-2" disabled>Detener Monitoreo</button>
+                        <small class="text-muted">
+                            Vuelos en área: <span id="flight-count" class="fw-bold">0</span><br>
+                            Carga: <span id="cargo-count" class="fw-bold text-warning">0</span>
+                        </small>
                     </div>
                 </div>
 
@@ -84,19 +187,109 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <!-- Chart.js (necesario para los gráficos) -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
+        function showToast(alert) {
+            const container = document.getElementById('toast-container');
+            const severityClass = `toast-${alert.severity}`;
+            const iconMap = {
+                'danger': '⚠️',
+                'warning': '⚡',
+                'info': 'ℹ️'
+            };
+            const icon = iconMap[alert.severity] || '•';
+            
+            const toastEl = document.createElement('div');
+            toastEl.className = `toast-item ${severityClass}`;
+            toastEl.innerHTML = `
+                <div class="toast-icon">${icon}</div>
+                <div class="toast-content">
+                    <div class="toast-title">${alert.title}</div>
+                    <div class="toast-message">${alert.message}</div>
+                </div>
+                <button class="toast-close" onclick="this.parentElement.remove()">✕</button>
+            `;
+            
+            container.appendChild(toastEl);
+            
+            // Auto-remove after 6 seconds
+            setTimeout(() => {
+                if (toastEl.parentElement) {
+                    toastEl.remove();
+                }
+            }, 6000);
+        }
+
+        let monitoringInterval = null;
+        let isMonitoring = false;
+
+        async function fetchFlights() {
+            try {
+                const response = await fetch('/api/vuelos');
+                const data = await response.json();
+                
+                if (data.vuelos) {
+                    const totalFlights = data.vuelos.length;
+                    const cargoFlights = data.vuelos.filter(v => v.type === 'carga').length;
+                    
+                    document.getElementById('flight-count').textContent = totalFlights;
+                    document.getElementById('cargo-count').textContent = cargoFlights;
+                    
+                    // Show alerts as toast notifications
+                    if (data.alerts && data.alerts.length > 0) {
+                        data.alerts.forEach(alert => {
+                            showToast(alert);
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching flights:', error);
+            }
+        }
+
+        document.getElementById('btn-start-monitoring').addEventListener('click', function() {
+            if (!isMonitoring) {
+                isMonitoring = true;
+                this.disabled = true;
+                document.getElementById('btn-stop-monitoring').disabled = false;
+                
+                // Fetch immediately
+                fetchFlights();
+                
+                // Then fetch every 10 seconds
+                monitoringInterval = setInterval(fetchFlights, 10000);
+                
+                showToast({
+                    title: 'Monitoreo Iniciado',
+                    message: 'Observando vuelos en el área de CDMX',
+                    severity: 'info'
+                });
+            }
+        });
+
+        document.getElementById('btn-stop-monitoring').addEventListener('click', function() {
+            if (isMonitoring) {
+                isMonitoring = false;
+                clearInterval(monitoringInterval);
+                this.disabled = true;
+                document.getElementById('btn-start-monitoring').disabled = false;
+                
+                showToast({
+                    title: 'Monitoreo Detenido',
+                    message: 'Se ha detenido la observación de vuelos',
+                    severity: 'info'
+                });
+            }
+        });
+
+        // Map initialization
         const API_URL = "/api/optimize-route";
-        
-        // Inicialización del Mapa Leaflet (Centrado en CDMX)
         const map = L.map('map').setView([19.5, -99.5], 9);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
-        let mapLayer = null; // Variable global para guardar la ruta dibujada
-
-        // Inicialización de la Gráfica (Placeholder) — defensivo
+        let mapLayer = null;
         let analysisChart = null;
+
         try {
             const ctx = document.getElementById('analysisChart').getContext('2d');
             analysisChart = new Chart(ctx, {
@@ -116,16 +309,13 @@
                 }
             });
         } catch (e) {
-            console.warn('Chart.js no disponible o fallo al crear gráfico:', e);
+            console.warn('Chart.js no disponible:', e);
             analysisChart = null;
         }
 
-
-        // FUNCIÓN DE ENVÍO DE DATOS
         document.getElementById('optimization-form').addEventListener('submit', async function(e) {
             e.preventDefault();
             
-            // 1. Recolección de datos
             const origen = [
                 parseFloat(document.getElementById('origen_lat').value),
                 parseFloat(document.getElementById('origen_lon').value)
@@ -135,7 +325,6 @@
                 parseFloat(document.getElementById('destino_lon').value)
             ];
             
-            // Convierte restricciones de texto (ej: 19.6,-99.2; 19.8,-99.5) a un array de arrays
             const restriccionesTexto = document.getElementById('restricciones').value.split(';').map(s => {
                 const parts = s.trim().split(',');
                 if (parts.length === 2) {
@@ -153,7 +342,6 @@
             document.getElementById('ruta-km').innerText = 'Calculando...';
             document.getElementById('status-wolfram').innerText = 'EJECUTANDO';
             
-            // 2. Envío a la API de Flask
             try {
                 const response = await fetch(API_URL, {
                     method: 'POST',
@@ -163,67 +351,64 @@
 
                 const data = await response.json();
                 
-                // Manejo de Errores de Conexión o Servidor
                 if (response.status !== 200 || data.error) {
                     document.getElementById('ruta-km').innerText = 'ERROR';
                     document.getElementById('status-wolfram').innerText = 'FALLO CRÍTICO';
                     document.getElementById('gemini-analysis').innerText = data.error || 'Error desconocido en el servidor.';
-                    document.getElementById('alerta-banner').style.display = 'block';
+                    showToast({
+                        title: 'Error en Cálculo',
+                        message: data.error || 'Error desconocido',
+                        severity: 'danger'
+                    });
                     return;
                 }
 
-                // 3. Procesamiento de Resultados
                 document.getElementById('status-wolfram').innerText = 'COMPLETADO';
                 document.getElementById('ruta-km').innerText = `${data.ruta_km || 'N/A'} KM`;
                 
-                // Muestra la alerta crítica (ElevenLabs)
-                const banner = document.getElementById('alerta-banner');
                 if (data.is_critical_alert) {
-                    banner.style.display = 'block';
-                    // Aquí iría el código para reproducir el audio de ElevenLabs
-                } else {
-                    banner.style.display = 'none';
+                    showToast({
+                        title: 'Alerta Crítica',
+                        message: `Ruta óptima de ${data.ruta_km} km con alto riesgo detectado`,
+                        severity: 'danger'
+                    });
                 }
 
-                // 4. Actualizar Elementos Visuales
                 updateMap(data.ruta_coordenadas);
                 updateChart(data.analisis_simulacion);
                 document.getElementById('gemini-analysis').innerText = data.analisis_ia_texto || 'Análisis de IA pendiente...';
-
 
             } catch (error) {
                 console.error("Error de red:", error);
                 document.getElementById('ruta-km').innerText = 'ERROR DE RED';
                 document.getElementById('status-wolfram').innerText = 'DESCONECTADO';
+                showToast({
+                    title: 'Error de Red',
+                    message: 'No se pudo conectar con el servidor',
+                    severity: 'danger'
+                });
             }
         });
 
-        // FUNCIÓN PARA DIBUJAR LA RUTA EN LEAFLET
         function updateMap(ruta_coordenadas) {
             if (!ruta_coordenadas || !ruta_coordenadas.length) return;
 
-            // 1. Limpiar capa anterior
             if (mapLayer) {
                 map.removeLayer(mapLayer);
             }
 
-                // La ruta optimizada debe ser un array de objetos {lat, lon}
-                const latlngs = ruta_coordenadas.map(p => [p.lat, p.lon]);
-            
+            const latlngs = ruta_coordenadas.map(p => [p.lat, p.lon]);
             mapLayer = L.polyline(latlngs, {color: 'blue', weight: 4}).addTo(map);
-            map.fitBounds(mapLayer.getBounds()); // Centra el mapa en la nueva ruta
+            map.fitBounds(mapLayer.getBounds());
         }
 
-        // FUNCIÓN PARA ACTUALIZAR GRÁFICA (T-C2)
         function updateChart(analisis) {
-            // Ejemplo de actualización de la gráfica de Monte Carlo
-            if (!analysisChart) return; // Chart no inicializado
+            if (!analysisChart) return;
             if (analisis && analisis.riesgo_alto !== undefined) {
                 analysisChart.data.datasets[0].data = [analisis.riesgo_alto, analisis.riesgo_exito];
                 analysisChart.update();
             }
         }
-        
     </script>
 </body>
 </html>

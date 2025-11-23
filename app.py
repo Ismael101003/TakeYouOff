@@ -7,7 +7,9 @@ import requests
 import random   
 import json     
 import logging
+import uuid
 from threading import Lock
+from pathlib import Path
 
 try:
     from flask_cors import CORS
@@ -22,7 +24,11 @@ from elevenlabs import ElevenLabs
 from google import genai
 # -----------------------------------------------------------
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static', static_url_path='/static')
+
+# Crear carpeta de audios si no existe
+AUDIO_FOLDER = Path('static/audio')
+AUDIO_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -251,25 +257,44 @@ def call_gemini_analysis(route_data_str):
 
 # --- ElevenLabs API (Voz de Alerta) ---
 def call_elevenlabs_alert(message):
-    """Genera audio de la alerta y devuelve la URL del archivo (simulado)."""
+    """
+    Genera audio de alerta usando ElevenLabs y lo guarda localmente.
+    Retorna la URL del archivo de audio para que el frontend lo reproduzca.
+    """
     
     if not ELEVENLABS_CLIENT:
-        logger.warning("ALERTA: Cliente ElevenLabs no inicializado. Usando texto.")
+        logger.warning("ALERTA: Cliente ElevenLabs no inicializado. No se generará audio.")
         return None 
     
     try:
-        logger.info("ALERTA: Generando audio de voz")
-        # ⚠️ Uso del cliente (método moderno para generar audio)
-        # audio = ELEVENLABS_CLIENT.audio.generate(
-        #     text=message,
-        #     voice="Bella", 
-        #     model="eleven_multilingual_v2"
-        # )
+        logger.info("ALERTA: Generando audio de voz con ElevenLabs...")
         
-        return "/static/alert.mp3" # Placeholder para el frontend
+        # Generar audio usando ElevenLabs (método correcto: text_to_speech)
+        audio = ELEVENLABS_CLIENT.text_to_speech.convert(
+            text=message,
+            voice_id="EXAVITQu4vr4xnSDxMaL",  # Bella (ID correcto)
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_22050_32"
+        )
+        
+        # Generar nombre único para el archivo
+        audio_filename = f"alert_{uuid.uuid4().hex[:8]}.mp3"
+        audio_path = AUDIO_FOLDER / audio_filename
+        
+        # Guardar el audio
+        with open(audio_path, 'wb') as f:
+            for chunk in audio:
+                f.write(chunk)
+        
+        # Retornar la URL del archivo
+        audio_url = f"/static/audio/{audio_filename}"
+        logger.info("ALERTA: Audio guardado en %s", audio_url)
+        
+        return audio_url
         
     except Exception as e:
-        logger.error("Error ElevenLabs en generación: %s", e)
+        logger.error("Error al generar audio con ElevenLabs: %s", e)
+        logger.error("Detalles:", exc_info=True)
         return None
 
 
