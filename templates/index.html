@@ -410,5 +410,54 @@
             }
         }
     </script>
+    <script>
+        // Reproduce audio inline cuando el backend devuelva `audio_alert_data` (data URL base64)
+        function playInlineAudioFromDataURL(dataUrl) {
+            try {
+                const audio = new Audio(dataUrl);
+                audio.autoplay = true;
+                audio.controls = false; // no mostrar controles
+                // esconder el elemento para que no sea visible en la UI
+                audio.style.display = 'none';
+                document.body.appendChild(audio);
+
+                // Eliminar el elemento cuando termine o tras 30s para limpiar el DOM
+                audio.addEventListener('ended', () => {
+                    try { audio.remove(); } catch (e) {}
+                });
+                setTimeout(() => { try { audio.remove(); } catch (e) {} }, 30000);
+
+                // Intentar reproducir; si el navegador bloquea autoplay, no mostraremos nada
+                audio.play().catch(err => {
+                    console.warn('Autoplay posiblemente bloqueado; audio no reproducido automáticamente:', err);
+                });
+            } catch (e) {
+                console.error('Error reproduciendo audio inline:', e);
+            }
+        }
+
+        // Wrapper ligero de fetch que detecta respuestas de endpoints críticos
+        // y reproduce cualquier `audio_alert_data` que venga en el JSON.
+        (function() {
+            const originalFetch = window.fetch.bind(window);
+            window.fetch = async function(resource, init) {
+                const response = await originalFetch(resource, init);
+                try {
+                    const url = (typeof resource === 'string') ? resource : (resource && resource.url);
+                    if (url && (url.includes('/api/optimize-route') || url.includes('/api/emergency-route') || url.includes('/api/vuelos'))) {
+                        // clonar para poder leer body sin consumir el stream original
+                        const clone = response.clone();
+                        const data = await clone.json().catch(() => null);
+                        if (data && data.audio_alert_data) {
+                            playInlineAudioFromDataURL(data.audio_alert_data);
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Error en fetch-wrapper para reproducción de audio:', e);
+                }
+                return response;
+            };
+        })();
+    </script>
 </body>
 </html>

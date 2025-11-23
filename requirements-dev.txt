@@ -1,0 +1,18 @@
+# Production requirements
+Flask>=2.0
+requests
+wolframclient
+elevenlabs
+google-genai
+flask-cors
+
+# Development requirements
+pytest>=7.0
+pytest-cov>=4.0
+black>=23.0
+flake8>=6.0
+pylint>=2.16.0
+
+# Documentation
+sphinx>=5.0
+sphinx-rtd-theme>=1.0

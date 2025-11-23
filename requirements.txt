@@ -4,3 +4,4 @@ wolframclient
 elevenlabs
 google-genai
 flask-cors
+python-dotenv

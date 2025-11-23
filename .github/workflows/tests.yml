@@ -1,0 +1,72 @@
+name: Tests & Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    
+    - name: Run tests
+      run: pytest test_app.py -v --cov=app --cov-report=xml
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Build Docker image
+      run: docker build -t opti-ruta-sky:${{ github.sha }} .
+    
+    - name: Run container test
+      run: |
+        docker run --rm -p 5000:5000 \
+          -e DEV_MOCK="1" \
+          opti-ruta-sky:${{ github.sha }} &
+        sleep 5
+        curl http://localhost:5000/health || exit 1
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install linters
+      run: |
+        pip install flake8 black
+    
+    - name: Lint with flake8
+      run: flake8 app.py --count --select=E9,F63,F7,F82 --show-source --statistics
+    
+    - name: Check code style with black
+      run: black app.py --check || true

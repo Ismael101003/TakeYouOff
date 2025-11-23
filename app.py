@@ -18,6 +18,7 @@ except Exception:
     _HAS_CORS = False
 
 from elevenlabs import ElevenLabs
+import base64
 
 
 # Asegúrate de haber instalado: pip install google-genai
@@ -34,6 +35,15 @@ AUDIO_FOLDER.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Cargar variables de entorno desde un archivo .env (si existe)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    logger.info(".env cargado (si estaba presente).")
+except Exception:
+    # Si python-dotenv no está instalado, continuamos y usamos las env vars del sistema
+    logger.debug("python-dotenv no está disponible; usando variables de entorno del sistema.")
+
 # ===================================================================
 # 1. CONFIGURACIÓN DE LLAVES Y KERNEL (Variables de Entorno)
 # ===================================================================
@@ -43,6 +53,7 @@ KERNEL_PATH = os.environ.get("WOLFRAM_KERNEL_PATH", r"C:\Program Files\Wolfram R
 
 # B. APIs Externas (Se recuperan de las variables de entorno)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+# Leer la clave de ElevenLabs correctamente desde la variable de entorno
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
 # C. Configuración de OpenRouter
@@ -110,9 +121,10 @@ def find_shortest_tour(points):
     
     # 2. Calcular distancia total
     total_distance = 0
-    for i in range(len(tour)):
+    # Distancia como TRAYECTO (one-way): sumar solo aristas consecutivas sin volver al origen
+    for i in range(len(tour) - 1):
         current = tour[i]
-        next_point = tour[(i + 1) % len(tour)]
+        next_point = tour[i + 1]
         total_distance += haversine_distance(
             points[current][0], points[current][1],
             points[next_point][0], points[next_point][1]
@@ -150,6 +162,7 @@ def find_shortest_tour(points):
                 # Si es mejor, hacer el cambio
                 if new_dist < curr_dist:
                     tour[i+1:j+1] = reversed(tour[i+1:j+1])
+                    # Actualizamos total_distance localmente (se recalculará exactamente al final)
                     total_distance = total_distance - curr_dist + new_dist
                     improved = True
                     break
@@ -158,7 +171,14 @@ def find_shortest_tour(points):
     
     # Convertir índices a coordenadas reales
     ruta_optimizada = [points[i] for i in tour]
-    
+
+    # Recalcular distancia exacta como suma de segmentos consecutivos (one-way)
+    total_distance = 0
+    for i in range(len(tour) - 1):
+        a = tour[i]
+        b = tour[i + 1]
+        total_distance += haversine_distance(points[a][0], points[a][1], points[b][0], points[b][1])
+
     return [total_distance, ruta_optimizada]
 
 
@@ -192,7 +212,218 @@ def optimize_route_wolfram(origen, destino, restricciones):
 
 
 # ===================================================================
-# 3. CONEXIÓN AL CLIENTE ELEVENLABS
+# 3. SISTEMA DE MONITOREO OPENSKY (Simulador + API Real)
+# ===================================================================
+
+class FlightMonitor:
+    """Sistema de monitoreo de tráfico aéreo con detección de conflictos."""
+    
+    def __init__(self):
+        self.flights = []
+        self.conflict_zones = [
+            {"lat": 19.5, "lon": -99.5, "radius": 15, "name": "CDMX Centro"},
+            {"lat": 19.4, "lon": -99.3, "radius": 10, "name": "Zona Este"}
+        ]
+        self.known_conflicts = set()
+        self._generate_mock_flights()
+    
+    def _generate_mock_flights(self):
+        """Genera vuelos simulados para demo."""
+        self.flights = [
+            {
+                "icao24": "a0a1b2c3",
+                "callsign": "AM456",
+                "lat": 19.45,
+                "lon": -99.25,
+                "alt": 2500,
+                "velocity": 450,
+                "heading": 90,
+                "type": "pasajero",
+                "origin": "BENITO JUÁREZ",
+                "destination": "QUERÉTARO"
+            },
+            {
+                "icao24": "d4e5f6g7",
+                "callsign": "AM789",
+                "lat": 19.55,
+                "lon": -99.35,
+                "alt": 3000,
+                "velocity": 420,
+                "heading": 180,
+                "type": "carga",
+                "origin": "CDMX",
+                "destination": "GUADALAJARA"
+            },
+            {
+                "icao24": "h8i9j0k1",
+                "callsign": "AM123",
+                "lat": 19.48,
+                "lon": -99.28,
+                "alt": 2800,
+                "velocity": 410,
+                "heading": 270,
+                "type": "pasajero",
+                "origin": "TLAXCALA",
+                "destination": "CDMX"
+            },
+            {
+                "icao24": "l2m3n4o5",
+                "callsign": "CARGO-01",
+                "lat": 19.52,
+                "lon": -99.50,
+                "alt": 3500,
+                "velocity": 480,
+                "heading": 45,
+                "type": "carga",
+                "origin": "CDMX",
+                "destination": "TOLUCA"
+            }
+        ]
+    
+    def fetch_opensky_data(self):
+        """Fetch real OpenSky data (usa OpenSky API si hay credenciales; si no, simula).
+
+        Intento de comportamiento:
+        1. Si existen `OPENSKY_CLIENT_ID` y `OPENSKY_CLIENT_SECRET` en el entorno,
+           intenta llamar a `services.opensky_api.get_flights(...)` con el bounding box
+           definido en `OPENSKY_BOUNDS` o el por defecto.
+        2. Si falla la llamada real por cualquier motivo, cae al modo simulación
+           (movimiento aleatorio de vuelos mock) para mantener la demo funcional.
+        """
+        try:
+            # Si están disponibles las credenciales, intentar fetch real
+            if os.environ.get("OPENSKY_CLIENT_ID") and os.environ.get("OPENSKY_CLIENT_SECRET"):
+                try:
+                    # Use the OpenSkyApi class from the bundled client library
+                    from services.opensky_api import OpenSkyApi
+
+                    # OPENSKY_BOUNDS esperado: lat_min,lon_min,lat_max,lon_max
+                    bounds = os.environ.get("OPENSKY_BOUNDS", "18.0,-100.0,21.0,-98.0").split(",")
+                    if len(bounds) == 4:
+                        lat_min = float(bounds[0])
+                        lon_min = float(bounds[1])
+                        lat_max = float(bounds[2])
+                        lon_max = float(bounds[3])
+                    else:
+                        lat_min, lon_min, lat_max, lon_max = 18.0, -100.0, 21.0, -98.0
+
+                    client = OpenSkyApi(username=os.environ.get("OPENSKY_CLIENT_ID"), password=os.environ.get("OPENSKY_CLIENT_SECRET"))
+
+                    # Note: OpenSkyApi.get_states expects bbox as (min_lat, max_lat, min_lon, max_lon)
+                    states_obj = client.get_states(time_secs=0, bbox=(lat_min, lat_max, lon_min, lon_max))
+
+                    flights = []
+                    if states_obj and getattr(states_obj, 'states', None):
+                        for sv in states_obj.states:
+                            try:
+                                lat = getattr(sv, 'latitude', None)
+                                lon = getattr(sv, 'longitude', None)
+                                alt = getattr(sv, 'geo_altitude', None) or getattr(sv, 'baro_altitude', None)
+                                velocity = getattr(sv, 'velocity', None)
+                                # velocity from OpenSky is m/s; keep as-is or convert as needed
+                                flights.append({
+                                    "icao24": getattr(sv, 'icao24', None),
+                                    "callsign": getattr(sv, 'callsign', None),
+                                    "lat": lat,
+                                    "lon": lon,
+                                    "alt": alt,
+                                    "velocity": velocity,
+                                    "heading": getattr(sv, 'true_track', None),
+                                    "type": "desconocido",
+                                    "origin": getattr(sv, 'origin_country', None),
+                                    "destination": None,
+                                })
+                            except Exception:
+                                continue
+
+                    if flights:
+                        self.flights = flights
+                        logger.info("OpenSky: fetched %d flights", len(self.flights))
+                        return self.flights
+                except Exception as e:
+                    logger.warning("OpenSky real fetch failed, falling back to mock: %s", e)
+
+            # Fallback: simulación local (mantener comportamiento anterior)
+            for flight in self.flights:
+                # Simular movimiento
+                flight["lat"] += random.uniform(-0.02, 0.02)
+                flight["lon"] += random.uniform(-0.02, 0.02)
+                # Ajustar altitud con un pequeño delta
+                try:
+                    flight["alt"] = (flight.get("alt") or 3000) + random.randint(-100, 100)
+                except Exception:
+                    flight["alt"] = flight.get("alt", 3000)
+
+            logger.info(f"Monitoreo (mock): {len(self.flights)} vuelos activos en CDMX")
+            return self.flights
+        except Exception as e:
+            logger.error("Error fetching OpenSky (general): %s", e)
+            return []
+    
+    def detect_conflicts(self):
+        """Detecta conflictos entre vuelos y zonas de restricción."""
+        conflicts = []
+        alerts = []
+        
+        # 1. Conflictos entre vuelos (proximidad)
+        for i in range(len(self.flights)):
+            for j in range(i + 1, len(self.flights)):
+                f1, f2 = self.flights[i], self.flights[j]
+                
+                # Calcular distancia 3D (lat, lon, altitud)
+                dist_horizontal = haversine_distance(
+                    f1['lat'], f1['lon'],
+                    f2['lat'], f2['lon']
+                )
+                dist_vertical = abs(f1['alt'] - f2['alt']) / 1000  # convertir a km
+                dist_3d = (dist_horizontal**2 + dist_vertical**2)**0.5
+                
+                # Si están a menos de 5 km en 3D, es un conflicto
+                if dist_3d < 5:
+                    conflict_id = f"{f1['icao24']}-{f2['icao24']}"
+                    if conflict_id not in self.known_conflicts:
+                        self.known_conflicts.add(conflict_id)
+                        conflicts.append({
+                            "type": "proximitad",
+                            "flight1": f1['callsign'],
+                            "flight2": f2['callsign'],
+                            "distance_km": round(dist_3d, 2),
+                            "severity": "crítica" if dist_3d < 2 else "alta"
+                        })
+                        alerts.append({
+                            "title": "⚠️ Conflicto de Proximidad",
+                            "message": f"{f1['callsign']} y {f2['callsign']} a {dist_3d:.1f} km",
+                            "severity": "danger"
+                        })
+        
+        # 2. Conflictos en zonas de restricción
+        for flight in self.flights:
+            for zone in self.conflict_zones:
+                dist = haversine_distance(
+                    flight['lat'], flight['lon'],
+                    zone['lat'], zone['lon']
+                )
+                
+                if dist < zone['radius']:
+                    zone_id = f"{flight['icao24']}-{zone['name']}"
+                    if zone_id not in self.known_conflicts:
+                        self.known_conflicts.add(zone_id)
+                        severity_level = "crítica" if dist < zone['radius']/2 else "alta"
+                        alerts.append({
+                            "title": f"⚡ Zona Restringida: {zone['name']}",
+                            "message": f"{flight['callsign']} en zona de restricción",
+                            "severity": "warning" if severity_level == "alta" else "danger"
+                        })
+        
+        return conflicts, alerts
+
+
+# Instancia global del monitor
+flight_monitor = FlightMonitor()
+
+
+# ===================================================================
+# 4. CONEXIÓN AL CLIENTE ELEVENLABS
 # ===================================================================
 
 ELEVENLABS_CLIENT = None
@@ -217,14 +448,20 @@ def call_gemini_analysis(route_data_str):
     if not OPENROUTER_API_KEY:
         return "OpenRouter Desconectado. (Clave API no configurada)"
 
-    # Prompt mejorado para forzar una salida estructurada y de valor (XAI)
-    prompt_text = (
-        f"Eres un analista de seguridad aérea y modelador de riesgos. Analiza los siguientes datos numéricos de cálculo de ruta geodésica (Wolfram): {route_data_str}. "
-        "Tu tarea es generar un informe contextual y accionable. "
-        "1. RESUMEN CRÍTICO (Tono urgente, máximo 3 oraciones): Identifica la principal causa de riesgo (ej: 'ruta excesivamente larga' o 'múltiples restricciones'). "
-        "2. RECOMENDACIONES DE MITIGACIÓN (Lista de 3 puntos): Ofrece acciones concretas y verificables para el piloto que minimicen el riesgo. "
-        "Formatea tu respuesta en un solo bloque de texto claro."
-    )
+    # Prompt mejorado para forzar una salida estructurada y de valor (XAI Avanzada)
+    if isinstance(route_data_str, dict):
+        # Si recibimos un dict, convertirlo a JSON
+        prompt_text = f"Eres un experto en seguridad aérea y optimización de rutas. Analiza este escenario de tráfico aéreo:\n\n{json.dumps(route_data_str, indent=2)}\n\nProporciona:\n1. EVALUACIÓN DE RIESGO (Crítico/Alto/Medio/Bajo)\n2. FACTORES CLAVE que afectan la seguridad\n3. RECOMENDACIONES ACCIONABLES para el controlador\n4. CONFIANZA DEL MODELO (0-100%)"
+    else:
+        # Análisis de ruta geodésica
+        prompt_text = (
+            f"Eres un analista de seguridad aérea y modelador de riesgos. Analiza los siguientes datos numéricos de cálculo de ruta geodésica (Wolfram): {route_data_str}. "
+            "Tu tarea es generar un informe contextual y accionable. "
+            "1. RESUMEN CRÍTICO (Tono urgente, máximo 3 oraciones): Identifica la principal causa de riesgo (ej: 'ruta excesivamente larga' o 'múltiples restricciones'). "
+            "2. RECOMENDACIONES DE MITIGACIÓN (Lista de 3 puntos): Ofrece acciones concretas y verificables para el piloto que minimicen el riesgo. "
+            "3. CONFIANZA DEL ANÁLISIS: % de confianza en la recomendación basado en datos disponibles. "
+            "Formatea tu respuesta en un solo bloque de texto claro y profesional."
+        )
     
     try:
         headers = {
@@ -256,7 +493,7 @@ def call_gemini_analysis(route_data_str):
 
 
 # --- ElevenLabs API (Voz de Alerta) ---
-def call_elevenlabs_alert(message):
+def call_elevenlabs_alert(message, save_to_file=False):
     """
     Genera audio de alerta usando ElevenLabs y lo guarda localmente.
     Retorna la URL del archivo de audio para que el frontend lo reproduzca.
@@ -268,29 +505,42 @@ def call_elevenlabs_alert(message):
     
     try:
         logger.info("ALERTA: Generando audio de voz con ElevenLabs...")
-        
+
         # Generar audio usando ElevenLabs (método correcto: text_to_speech)
-        audio = ELEVENLABS_CLIENT.text_to_speech.convert(
+        audio_iter = ELEVENLABS_CLIENT.text_to_speech.convert(
             text=message,
-            voice_id="EXAVITQu4vr4xnSDxMaL",  # Bella (ID correcto)
+            voice_id="EXAVITQu4vr4xnSDxMaL",
             model_id="eleven_multilingual_v2",
             output_format="mp3_22050_32"
         )
-        
-        # Generar nombre único para el archivo
-        audio_filename = f"alert_{uuid.uuid4().hex[:8]}.mp3"
-        audio_path = AUDIO_FOLDER / audio_filename
-        
-        # Guardar el audio
-        with open(audio_path, 'wb') as f:
-            for chunk in audio:
-                f.write(chunk)
-        
-        # Retornar la URL del archivo
-        audio_url = f"/static/audio/{audio_filename}"
-        logger.info("ALERTA: Audio guardado en %s", audio_url)
-        
-        return audio_url
+
+        # Recolectar bytes en memoria
+        try:
+            audio_bytes = b"".join(audio_iter)
+        except TypeError:
+            # Si el iterador devuelve chunks que no son exactamente bytes, try to concatenate
+            audio_bytes = b""
+            for chunk in audio_iter:
+                if isinstance(chunk, (bytes, bytearray)):
+                    audio_bytes += bytes(chunk)
+                else:
+                    # fall back: if chunk is str, encode
+                    audio_bytes += str(chunk).encode('utf-8')
+
+        if save_to_file:
+            # Generar nombre único para el archivo
+            audio_filename = f"alert_{uuid.uuid4().hex[:8]}.mp3"
+            audio_path = AUDIO_FOLDER / audio_filename
+            with open(audio_path, 'wb') as f:
+                f.write(audio_bytes)
+            audio_url = f"/static/audio/{audio_filename}"
+            logger.info("ALERTA: Audio guardado en %s", audio_url)
+            return audio_url
+
+        # Si no se guarda, devolver como data URL base64 para reproducción inmediata en frontend
+        b64 = base64.b64encode(audio_bytes).decode('ascii')
+        data_url = f"data:audio/mpeg;base64,{b64}"
+        return data_url
         
     except Exception as e:
         logger.error("Error al generar audio con ElevenLabs: %s", e)
@@ -405,10 +655,12 @@ def optimize_route():
         gemini_analysis = call_gemini_analysis(wolfram_result_str)
 
         # --- 5.5 LLAMADA A ELEVENLABS ---
-        audio_url = None
+        audio_alert_url = None
+        audio_alert_data = None
         if is_critical:
             alert_message = f"ALERTA CRÍTICA: La ruta óptima excede los {int(ruta_km)} kilómetros y presenta alto riesgo. Verifique el análisis de Gemini."
-            audio_url = call_elevenlabs_alert(alert_message)
+            # No guardar archivo en disco; obtener data URL para reproducción en frontend
+            audio_alert_data = call_elevenlabs_alert(alert_message, save_to_file=False)
             
         # 5. Respuesta Final para el Frontend
         return jsonify({
@@ -417,7 +669,8 @@ def optimize_route():
             "ruta_coordenadas": ruta_coordenadas_normalizadas,
             "is_critical_alert": is_critical,
             "analisis_ia_texto": gemini_analysis,
-            "audio_alert_url": audio_url,
+            "audio_alert_url": audio_alert_url,
+            "audio_alert_data": audio_alert_data,
             "analisis_simulacion": {"riesgo_alto": round(10 + len(restricciones) * 5 + ruta_km / 100), "riesgo_exito": round(90 - len(restricciones) * 5 - ruta_km / 100)} 
         })
 
@@ -425,12 +678,171 @@ def optimize_route():
         logger.exception("Error en el endpoint optimize-route: %s", e)
         return jsonify({"error": f"Error interno del servidor: {e}"}), 500
 
-if __name__ == '__main__':
-    # Ejecutar en la terminal: python app.py
-    app.run(debug=True, port=5000)
-
-
 @app.route('/health', methods=['GET'])
 def health():
     """Health endpoint simple."""
     return jsonify({"status": "ok", "dev_mock": DEV_MOCK})
+
+
+# ===================================================================
+# 6. NUEVOS ENDPOINTS PARA OPTI-RUTA SKY (OpenSky Monitoring)
+# ===================================================================
+
+@app.route('/api/vuelos', methods=['GET'])
+def get_vuelos():
+    """
+    Endpoint de monitoreo OpenSky.
+    Retorna vuelos activos en CDMX y detecta conflictos.
+    Integración con el frontend para monitoreo en tiempo real.
+    """
+    try:
+        # Actualizar datos de vuelos
+        flight_monitor.fetch_opensky_data()
+        
+        # Detectar conflictos
+        conflicts, alerts = flight_monitor.detect_conflicts()
+        
+        return jsonify({
+            "status": "ok",
+            "vuelos": flight_monitor.flights,
+            "conflictos": conflicts,
+            "alerts": alerts,
+            "total_vuelos": len(flight_monitor.flights),
+            "total_conflictos": len(conflicts)
+        })
+    
+    except Exception as e:
+        logger.error(f"Error en endpoint vuelos: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/conflict-analysis', methods=['POST'])
+def analyze_conflict():
+    """
+    Análisis detallado de conflicto específico usando Gemini.
+    Input: dos vuelos con conflicto detectado.
+    Output: recomendación de desvío y análisis de riesgo.
+    """
+    try:
+        data = request.json or {}
+        flight1 = data.get('flight1', {})
+        flight2 = data.get('flight2', {})
+        
+        if not flight1 or not flight2:
+            return jsonify({"error": "Vuelos requeridos"}), 400
+        
+        # Preparar contexto para Gemini
+        context = {
+            "vuelo1": {
+                "callsign": flight1.get('callsign'),
+                "alt": flight1.get('alt'),
+                "heading": flight1.get('heading'),
+                "velocity": flight1.get('velocity'),
+                "origin": flight1.get('origin')
+            },
+            "vuelo2": {
+                "callsign": flight2.get('callsign'),
+                "alt": flight2.get('alt'),
+                "heading": flight2.get('heading'),
+                "velocity": flight2.get('velocity'),
+                "origin": flight2.get('origin')
+            }
+        }
+        
+        # Llamar a Gemini para análisis
+        prompt = (
+            f"Eres un controlador aéreo experto. Analiza este conflicto de tráfico aéreo:\n\n"
+            f"Vuelo 1 ({context['vuelo1']['callsign']}): Altitud {context['vuelo1']['alt']}ft, "
+            f"Rumbo {context['vuelo1']['heading']}°, Velocidad {context['vuelo1']['velocity']}km/h\n"
+            f"Vuelo 2 ({context['vuelo2']['callsign']}): Altitud {context['vuelo2']['alt']}ft, "
+            f"Rumbo {context['vuelo2']['heading']}°, Velocidad {context['vuelo2']['velocity']}km/h\n\n"
+            f"Proporciona:\n"
+            f"1. RIESGO INMEDIATO: Evaluación rápida (Alto/Medio/Bajo)\n"
+            f"2. ACCIÓN RECOMENDADA: Qué debe hacer cada vuelo\n"
+            f"3. JUSTIFICACIÓN MATEMÁTICA: Por qué esta solución es óptima\n"
+        )
+        
+        analysis = call_gemini_analysis(prompt)
+        
+        return jsonify({
+            "status": "ok",
+            "conflict_analysis": analysis,
+            "context": context
+        })
+    
+    except Exception as e:
+        logger.error(f"Error en conflict-analysis: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/emergency-route', methods=['POST'])
+def emergency_route():
+    """
+    Calcula ruta de emergencia rápida cuando hay conflicto.
+    Similar a optimize-route pero con constraints críticos.
+    """
+    try:
+        data = request.json or {}
+        flight_position = data.get('flight_position')  # [lat, lon]
+        destination = data.get('destination')  # [lat, lon]
+        restricted_zones = data.get('restricted_zones', [])
+        
+        if not flight_position or not destination:
+            return jsonify({"error": "flight_position y destination requeridos"}), 400
+        
+        # Usar el mismo solver que optimize-route
+        result = optimize_route_wolfram(flight_position, destination, restricted_zones)
+        
+        if result is None:
+            return jsonify({"error": "No se pudo calcular ruta de emergencia"}), 503
+        
+        # Generar alerta crítica de voz (no guardamos el audio, devolvemos data URL)
+        alert_msg = f"Ruta de emergencia calculada: {result['RutaTotalKM']} kilómetros. Siga las coordenadas en pantalla."
+        audio_data = call_elevenlabs_alert(alert_msg, save_to_file=False)
+        
+        return jsonify({
+            "status": "success",
+            "emergency_route": result['RutaOptimizada'],
+            "total_km": result['RutaTotalKM'],
+            "audio_alert": None,
+            "audio_alert_data": audio_data,
+            "timestamp": str(__import__('datetime').datetime.now())
+        })
+    
+    except Exception as e:
+        logger.error(f"Error en emergency-route: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/statistics', methods=['GET'])
+def get_statistics():
+    """Estadísticas del sistema para dashboard."""
+    try:
+        total_flights = len(flight_monitor.flights)
+        cargo_flights = len([f for f in flight_monitor.flights if f['type'] == 'carga'])
+        passenger_flights = total_flights - cargo_flights
+        
+        # Calcular altitud promedio
+        avg_alt = sum(f['alt'] for f in flight_monitor.flights) / total_flights if total_flights > 0 else 0
+        
+        return jsonify({
+            "status": "ok",
+            "total_flights": total_flights,
+            "cargo_flights": cargo_flights,
+            "passenger_flights": passenger_flights,
+            "average_altitude": round(avg_alt, 0),
+            "conflict_zones": len(flight_monitor.conflict_zones),
+            "active_monitoring": True
+        })
+    
+    except Exception as e:
+        logger.error(f"Error en statistics: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == '__main__':
+    # Ejecutar en la terminal: python app.py
+    logger.info("🚀 OPTI-RUTA SKY iniciando...")
+    logger.info(f"📍 Modo desarrollo: DEV_MOCK={DEV_MOCK}")
+    logger.info("✈️ Sistema de monitoreo OpenSky activo")
+    app.run(debug=True, port=5000)
