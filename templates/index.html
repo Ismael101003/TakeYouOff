@@ -84,6 +84,8 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Chart.js (necesario para los gráficos) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
         const API_URL = "/api/optimize-route";
         
@@ -93,24 +95,30 @@
 
         let mapLayer = null; // Variable global para guardar la ruta dibujada
 
-        // Inicialización de la Gráfica (Placeholder)
-        const ctx = document.getElementById('analysisChart').getContext('2d');
-        const analysisChart = new Chart(ctx, {
-            type: 'bar',
-            data: { 
-                labels: ['Probabilidad Riesgo', 'Probabilidad Éxito'], 
-                datasets: [{ 
-                    label: 'Análisis de Incertidumbre', 
-                    data: [0, 0],
-                    backgroundColor: ['rgba(255, 99, 132, 0.5)', 'rgba(75, 192, 192, 0.5)'],
-                }] 
-            },
-            options: {
-                responsive: true,
-                scales: { y: { beginAtZero: true, max: 100 } },
-                plugins: { legend: { display: false } }
-            }
-        });
+        // Inicialización de la Gráfica (Placeholder) — defensivo
+        let analysisChart = null;
+        try {
+            const ctx = document.getElementById('analysisChart').getContext('2d');
+            analysisChart = new Chart(ctx, {
+                type: 'bar',
+                data: { 
+                    labels: ['Probabilidad Riesgo', 'Probabilidad Éxito'], 
+                    datasets: [{ 
+                        label: 'Análisis de Incertidumbre', 
+                        data: [0, 0],
+                        backgroundColor: ['rgba(255, 99, 132, 0.5)', 'rgba(75, 192, 192, 0.5)'],
+                    }] 
+                },
+                options: {
+                    responsive: true,
+                    scales: { y: { beginAtZero: true, max: 100 } },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        } catch (e) {
+            console.warn('Chart.js no disponible o fallo al crear gráfico:', e);
+            analysisChart = null;
+        }
 
 
         // FUNCIÓN DE ENVÍO DE DATOS
@@ -199,8 +207,8 @@
                 map.removeLayer(mapLayer);
             }
 
-            // La ruta optimizada debe ser un array de [lat, lon]
-            const latlngs = ruta_coordenadas.map(p => [p.lat, p.lon]);
+                // La ruta optimizada debe ser un array de objetos {lat, lon}
+                const latlngs = ruta_coordenadas.map(p => [p.lat, p.lon]);
             
             mapLayer = L.polyline(latlngs, {color: 'blue', weight: 4}).addTo(map);
             map.fitBounds(mapLayer.getBounds()); // Centra el mapa en la nueva ruta
@@ -209,6 +217,7 @@
         // FUNCIÓN PARA ACTUALIZAR GRÁFICA (T-C2)
         function updateChart(analisis) {
             // Ejemplo de actualización de la gráfica de Monte Carlo
+            if (!analysisChart) return; // Chart no inicializado
             if (analisis && analisis.riesgo_alto !== undefined) {
                 analysisChart.data.datasets[0].data = [analisis.riesgo_alto, analisis.riesgo_exito];
                 analysisChart.update();

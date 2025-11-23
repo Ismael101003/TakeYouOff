@@ -1,0 +1,6 @@
+Flask>=2.0
+requests
+wolframclient
+elevenlabs
+google-genai
+flask-cors
