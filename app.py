@@ -21,7 +21,7 @@ app = Flask(__name__)
 # ===================================================================
 
 # A. Wolfram Kernel Path (La ruta que encontraste y te funcionó)
-KERNEL_PATH = os.environ.get("WOLFRAM_KERNEL_PATH", r"C:\Program Files\Wolfram Research\Mathematica\13.2\WolframKernel.exe")
+KERNEL_PATH = os.environ.get("WOLFRAM_KERNEL_PATH", r"C:\Program Files\Wolfram Research\Wolfram\14.3\WolframKernel.exe")
 
 # B. APIs Externas (Se recuperan de las variables de entorno)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
