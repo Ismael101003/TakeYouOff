@@ -130,16 +130,21 @@
                     </div>
                     <div class="card-body">
                         <form id="optimization-form">
-                            <h6 class="mt-2">Origen (Lat, Lon):</h6>
-                            <input type="text" id="origen_lat" class="form-control form-control-sm" placeholder="Latitud (ej: 19.43)" required>
-                            <input type="text" id="origen_lon" class="form-control form-control-sm mb-3" placeholder="Longitud (ej: -99.13)" required>
+                            <h6 class="mt-2">Origen (Coordenadas o Dirección):</h6>
+                            <input type="text" id="origen_input" class="form-control form-control-sm" placeholder="Lat, Lon o Dirección (ej: Aeropuerto CDMX)" required>
 
-                            <h6>Destino (Lat, Lon):</h6>
-                            <input type="text" id="destino_lat" class="form-control form-control-sm" placeholder="Latitud (ej: 20.00)" required>
-                            <input type="text" id="destino_lon" class="form-control form-control-sm mb-3" placeholder="Longitud (ej: -99.90)" required>
+                            <h6>Destino (Coordenadas o Dirección):</h6>
+                            <input type="text" id="destino_input" class="form-control form-control-sm" placeholder="Lat, Lon o Dirección (ej: Querétaro Centro)" required>
                             
-                            <h6>Restricciones (Separadas por coma):</h6>
-                            <textarea id="restricciones" class="form-control form-control-sm mb-4" rows="2" placeholder="Ej: 19.6,-99.2; 19.8,-99.5"></textarea>
+                            <h6>Restricciones (Separadas por punto y coma - coordenadas o direcciones):</h6>
+                            <textarea id="restricciones" class="form-control form-control-sm mb-4" rows="2" placeholder="Ej: 19.6,-99.2; Aeropuerto de Toluca; 19.8,-99.5"></textarea>
+
+                            <div class="form-check mb-3">
+                                <input class="form-check-input" type="checkbox" value="" id="force_audio_checkbox">
+                                <label class="form-check-label small text-muted" for="force_audio_checkbox">
+                                    Reproducir audio siempre (para pruebas)
+                                </label>
+                            </div>
 
                             <button type="submit" class="btn btn-primary w-100 fw-bold">Calcular Ruta Óptima</button>
                         </form>
@@ -249,16 +254,19 @@
 
         document.getElementById('btn-start-monitoring').addEventListener('click', function() {
             if (!isMonitoring) {
+                // Desbloquear audio con el gesto de usuario para permitir reproducciones futuras automáticas
+                try { unlockAudio(); } catch (e) { console.warn('unlockAudio falla en start-monitoring:', e); }
+
                 isMonitoring = true;
                 this.disabled = true;
                 document.getElementById('btn-stop-monitoring').disabled = false;
-                
+
                 // Fetch immediately
                 fetchFlights();
-                
+
                 // Then fetch every 10 seconds
                 monitoringInterval = setInterval(fetchFlights, 10000);
-                
+
                 showToast({
                     title: 'Monitoreo Iniciado',
                     message: 'Observando vuelos en el área de CDMX',
@@ -315,29 +323,40 @@
 
         document.getElementById('optimization-form').addEventListener('submit', async function(e) {
             e.preventDefault();
+            // Intentar desbloquear audio en el gesto del usuario (permite autoplay luego)
+            try { unlockAudio(); } catch (e) { console.warn('unlockAudio falló:', e); }
             
-            const origen = [
-                parseFloat(document.getElementById('origen_lat').value),
-                parseFloat(document.getElementById('origen_lon').value)
-            ];
-            const destino = [
-                parseFloat(document.getElementById('destino_lat').value),
-                parseFloat(document.getElementById('destino_lon').value)
-            ];
-            
-            const restriccionesTexto = document.getElementById('restricciones').value.split(';').map(s => {
-                const parts = s.trim().split(',');
+            // Helper: si el input parece lat,lon devuelve array de floats, si no devuelve la string original
+            function parseMaybeCoords(input) {
+                const s = (input || '').trim();
+                if (!s) return null;
+                // Si tiene una coma y dos números, interpretar como coords
+                const parts = s.split(',').map(p => p.trim());
                 if (parts.length === 2) {
-                    return [parseFloat(parts[0]), parseFloat(parts[1])];
+                    const a = parseFloat(parts[0]);
+                    const b = parseFloat(parts[1]);
+                    if (!isNaN(a) && !isNaN(b)) return [a, b];
                 }
-                return null;
+                // Sino devolver la cadena (dirección)
+                return s;
+            }
+
+            const origen = parseMaybeCoords(document.getElementById('origen_input').value);
+            const destino = parseMaybeCoords(document.getElementById('destino_input').value);
+
+            const restriccionesTexto = (document.getElementById('restricciones').value || '').split(';').map(s => {
+                const t = s.trim();
+                if (!t) return null;
+                const parsed = parseMaybeCoords(t);
+                return parsed;
             }).filter(item => item !== null);
 
-            const payload = {
-                origen: origen,
-                destino: destino,
-                restricciones: restriccionesTexto
-            };
+                const payload = {
+                    origen: origen,
+                    destino: destino,
+                    restricciones: restriccionesTexto,
+                    force_audio: !!document.getElementById('force_audio_checkbox').checked
+                };
 
             document.getElementById('ruta-km').innerText = 'Calculando...';
             document.getElementById('status-wolfram').innerText = 'EJECUTANDO';
@@ -411,6 +430,52 @@
         }
     </script>
     <script>
+        // Intenta desbloquear la política de autoplay del navegador
+        function unlockAudio() {
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+
+                if (!window.__unlockAudioCtx) {
+                    window.__unlockAudioCtx = new AudioCtx();
+                }
+
+                const ctx = window.__unlockAudioCtx;
+                if (ctx.state === 'suspended') {
+                    ctx.resume().catch(() => {});
+                }
+
+                // Reproducir un buffer muy corto (silencioso) para que el gesto de usuario desbloquee reproducción
+                try {
+                    const buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+                    const src = ctx.createBufferSource();
+                    src.buffer = buffer;
+                    src.connect(ctx.destination);
+                    src.start(0);
+                    setTimeout(() => { try { src.stop(); src.disconnect(); } catch (e) {} }, 50);
+                } catch (err) {
+                    // No fatal
+                }
+            } catch (e) {
+                // Silencioso
+            }
+        }
+
+        // Intento silencioso de resume() al cargar la página (no garantiza nada sin interacción)
+        try {
+            window.addEventListener('load', () => {
+                try {
+                    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                    if (AudioCtx && !window.__unlockAudioCtx) {
+                        window.__unlockAudioCtx = new AudioCtx();
+                        if (window.__unlockAudioCtx.state === 'suspended') {
+                            window.__unlockAudioCtx.resume().catch(() => {});
+                        }
+                    }
+                } catch (e) {}
+            });
+        } catch (e) {}
+
         // Reproduce audio inline cuando el backend devuelva `audio_alert_data` (data URL base64)
         function playInlineAudioFromDataURL(dataUrl) {
             try {

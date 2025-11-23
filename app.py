@@ -7,6 +7,7 @@ import requests
 import random   
 import json     
 import logging
+import re
 import uuid
 from threading import Lock
 from pathlib import Path
@@ -492,6 +493,90 @@ def call_gemini_analysis(route_data_str):
         return "Error en la llamada a OpenRouter: No se pudo obtener el análisis."
 
 
+def call_geocode_address(address):
+    """
+    Usa OpenRouter / Gemini para convertir una dirección libre a coordenadas (lat, lon).
+    Devuelve un tuple (lat, lon) como floats o None si falla.
+    """
+    if not OPENROUTER_API_KEY:
+        logger.warning("Geocoding: OpenRouter API key no configurada.")
+        return None
+
+    # Primero intentar con OpenRouter/Gemini si hay clave
+    content = None
+    if OPENROUTER_API_KEY:
+        prompt = (
+            "Devuelve SOLO un JSON válido con las claves 'lat' y 'lon' (valores numéricos).\n"
+            "Respuesta ejemplo: ```{\"lat\": 19.4326, \"lon\": -99.1332}```\n"
+            f"Dirección a geocodificar: {address}\n\nSi no puedes geocodificar, responde `null`."
+        )
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "google/gemini-2.5-pro",
+                "messages": [{"role": "user", "content": prompt}]
+            }
+
+            resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=15)
+            resp.raise_for_status()
+
+            # OpenRouter devuelve JSON con choices[...] -> message.content
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and data.get('choices'):
+                    content = data['choices'][0]['message'].get('content', '')
+                else:
+                    content = json.dumps(data)
+            except Exception:
+                content = resp.text
+
+            # Buscar un JSON en el texto
+            m = re.search(r"\{[^}]*\}", content)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                    if 'lat' in parsed and 'lon' in parsed:
+                        return float(parsed['lat']), float(parsed['lon'])
+                except Exception:
+                    pass
+
+            # Buscar floats en el texto como fallback
+            floats = re.findall(r"-?\d+\.\d+", content or "")
+            if len(floats) >= 2:
+                try:
+                    return float(floats[0]), float(floats[1])
+                except Exception:
+                    pass
+
+            logger.warning("OpenRouter no pudo geocodificar '%s'. Respuesta: %s", address, (content or '')[:300])
+
+        except requests.exceptions.RequestException as e:
+            logger.warning("OpenRouter geocoding request failed: %s", e)
+
+    # Si OpenRouter falla o no hay clave, usar Nominatim (OpenStreetMap) como fallback
+    try:
+        nominatim_url = "https://nominatim.openstreetmap.org/search"
+        params = { 'q': address, 'format': 'json', 'limit': 1 }
+        headers = { 'User-Agent': 'TakeYouOff/1.0 (+https://example.org)' }
+        r = requests.get(nominatim_url, params=params, headers=headers, timeout=8)
+        r.raise_for_status()
+        results = r.json()
+        if results and isinstance(results, list) and len(results) > 0:
+            lat = float(results[0].get('lat'))
+            lon = float(results[0].get('lon'))
+            logger.info("Geocoding Nominatim OK para '%s' -> %s,%s", address, lat, lon)
+            return lat, lon
+    except Exception as e:
+        logger.warning("Nominatim geocoding failed for '%s': %s", address, e)
+
+    logger.warning("Geocoding falló para '%s' con ambos servicios.", address)
+    return None
+
+
 # --- ElevenLabs API (Voz de Alerta) ---
 def call_elevenlabs_alert(message, save_to_file=False):
     """
@@ -570,6 +655,30 @@ def optimize_route():
     destino_list = data.get('destino')
     restricciones = data.get('restricciones', [])
 
+    # Helper para convertir input variado (coords list/dict o dirección string) a [lat, lon]
+    def resolve_location(val):
+        # Si ya es lista/tupla con números
+        try:
+            if isinstance(val, (list, tuple)) and len(val) == 2:
+                return [float(val[0]), float(val[1])]
+        except Exception:
+            pass
+
+        # Si es dict {'lat':.., 'lon':..}
+        try:
+            if isinstance(val, dict) and 'lat' in val and 'lon' in val:
+                return [float(val['lat']), float(val['lon'])]
+        except Exception:
+            pass
+
+        # Si es string, intentar geocodificar usando Gemini/OpenRouter
+        if isinstance(val, str) and val.strip():
+            coords = call_geocode_address(val.strip())
+            if coords:
+                return [coords[0], coords[1]]
+
+        return None
+
     if DEV_MOCK:
         # Validación básica
         try:
@@ -602,12 +711,25 @@ def optimize_route():
             except Exception:
                 return False
 
-        if not valid_coord(origen_list) or not valid_coord(destino_list):
-            return jsonify({"error": "Los campos 'origen' y 'destino' deben ser listas [lat, lon] con valores numéricos."}), 400
+        # Intentar resolver orígenes/destinos que pueden ser coordenadas o direcciones
+        origen_coords = resolve_location(origen_list)
+        destino_coords = resolve_location(destino_list)
+
+        if not origen_coords or not destino_coords:
+            return jsonify({"error": "No se pudieron resolver 'origen' o 'destino' a coordenadas válidas. Pueden ser listas [lat, lon] o direcciones."}), 400
         
         # --- 5.1 LLAMADA AL MOTOR WOLFRAM (usando wolframscript) ---
         logger.info("Llamando a optimize_route_wolfram...")
-        wolfram_result = optimize_route_wolfram(origen_list, destino_list, restricciones)
+
+        # Resolver restricciones: pueden ser listas de coordenadas o direcciones
+        resolved_restrictions = []
+        if isinstance(restricciones, (list, tuple)):
+            for r in restricciones:
+                rc = resolve_location(r)
+                if rc:
+                    resolved_restrictions.append(rc)
+        # Llamar al solver con coordenadas resueltas
+        wolfram_result = optimize_route_wolfram(origen_coords, destino_coords, resolved_restrictions)
         
         if wolfram_result is None:
             return jsonify({"error": "Motor Wolfram no respondió. Contacte al Modelador."}), 503
@@ -657,9 +779,29 @@ def optimize_route():
         # --- 5.5 LLAMADA A ELEVENLABS ---
         audio_alert_url = None
         audio_alert_data = None
-        if is_critical:
-            alert_message = f"ALERTA CRÍTICA: La ruta óptima excede los {int(ruta_km)} kilómetros y presenta alto riesgo. Verifique el análisis de Gemini."
-            # No guardar archivo en disco; obtener data URL para reproducción en frontend
+        # Permitir forzar audio desde el frontend para pruebas: {"force_audio": true}
+        force_audio = bool(data.get('force_audio', False))
+        should_generate_audio = is_critical or force_audio
+
+        if should_generate_audio:
+            # Construir mensaje de alerta. Si no es crítico, usar un texto menos alarmista.
+            if is_critical:
+                alert_message = f"ALERTA CRÍTICA: La ruta óptima excede los {int(ruta_km)} kilómetros y presenta alto riesgo. Verifique el análisis de Gemini."
+            else:
+                # Incluir parte del análisis de Gemini cuando esté disponible
+                short_analysis = None
+                try:
+                    if isinstance(gemini_analysis, str) and len(gemini_analysis) > 0:
+                        short_analysis = gemini_analysis.split('\n')[0]
+                except Exception:
+                    short_analysis = None
+
+                if short_analysis:
+                    alert_message = f"ALERTA: Riesgo detectado en la ruta. Resumen: {short_analysis}"
+                else:
+                    alert_message = f"ALERTA: Riesgo detectado en la ruta. Revisa el informe de IA en pantalla."
+
+            logger.info("Generando audio de alerta (force_audio=%s, is_critical=%s)", force_audio, is_critical)
             audio_alert_data = call_elevenlabs_alert(alert_message, save_to_file=False)
             
         # 5. Respuesta Final para el Frontend
@@ -783,15 +925,42 @@ def emergency_route():
     """
     try:
         data = request.json or {}
-        flight_position = data.get('flight_position')  # [lat, lon]
-        destination = data.get('destination')  # [lat, lon]
+        flight_position = data.get('flight_position')  # [lat, lon] or address
+        destination = data.get('destination')  # [lat, lon] or address
         restricted_zones = data.get('restricted_zones', [])
         
         if not flight_position or not destination:
             return jsonify({"error": "flight_position y destination requeridos"}), 400
-        
+
+        # Resolver posibles direcciones a coordenadas
+        def _resolve(val):
+            try:
+                if isinstance(val, (list, tuple)) and len(val) == 2:
+                    return [float(val[0]), float(val[1])]
+            except Exception:
+                pass
+            if isinstance(val, str):
+                coords = call_geocode_address(val)
+                if coords:
+                    return [coords[0], coords[1]]
+            return None
+
+        fp_coords = _resolve(flight_position)
+        dst_coords = _resolve(destination)
+
+        if not fp_coords or not dst_coords:
+            return jsonify({"error": "No se pudieron resolver flight_position o destination a coordenadas válidas."}), 400
+
+        # Resolver restricciones si hay
+        resolved_restrictions = []
+        if isinstance(restricted_zones, (list, tuple)):
+            for r in restricted_zones:
+                rc = _resolve(r)
+                if rc:
+                    resolved_restrictions.append(rc)
+
         # Usar el mismo solver que optimize-route
-        result = optimize_route_wolfram(flight_position, destination, restricted_zones)
+        result = optimize_route_wolfram(fp_coords, dst_coords, resolved_restrictions)
         
         if result is None:
             return jsonify({"error": "No se pudo calcular ruta de emergencia"}), 503
