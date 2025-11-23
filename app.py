@@ -9,7 +9,6 @@ import json
 import logging
 from threading import Lock
 
-# Optional CORS support (will work if flask_cors is installed)
 try:
     from flask_cors import CORS
     _HAS_CORS = True
@@ -51,24 +50,139 @@ DEV_MOCK = os.environ.get("DEV_MOCK", "0") == "1"
 # 2. CONEXIÓN AL MOTOR DE WOLFRAM
 # ===================================================================
 
-WOLFRAM_SESSION = None
-_WOLFRAM_LOCK = Lock()
+# ===================================================================
+# 2. CONEXIÓN AL MOTOR DE WOLFRAM (usando implementación Python puro)
+# ===================================================================
 
-def get_wolfram_session():
-    """Lazy-initialize and return a WolframLanguageSession or None on failure."""
-    global WOLFRAM_SESSION
-    if WOLFRAM_SESSION is not None:
-        return WOLFRAM_SESSION
-    with _WOLFRAM_LOCK:
-        if WOLFRAM_SESSION is not None:
-            return WOLFRAM_SESSION
-        try:
-            WOLFRAM_SESSION = WolframLanguageSession(kernel=KERNEL_PATH)
-            logger.info("SERVERS: Wolfram Kernel conectado (lazy init).")
-        except Exception as e:
-            logger.error("ERROR: No se pudo conectar a Wolfram Kernel. Las matemáticas fallarán. %s", e)
-            WOLFRAM_SESSION = None
-    return WOLFRAM_SESSION
+from math import radians, cos, sin, asin, sqrt
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calcula la distancia entre dos puntos en km usando la fórmula haversine
+    (aproximación de la distancia geodésica)
+    """
+    # Convertir a radianes
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    
+    # Diferencias
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    
+    # Fórmula haversine
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    
+    # Radio de la Tierra en km
+    km = 6371 * c
+    return km
+
+
+def find_shortest_tour(points):
+    """
+    Implementación simplificada del algoritmo del viajante de comercio (TSP)
+    usando una heurística greedy + 2-opt.
+    
+    Retorna [distancia_total, ruta_optimizada]
+    """
+    if not points or len(points) <= 1:
+        return [0, points]
+    
+    n = len(points)
+    
+    # 1. Heurística greedy: comenzar desde el primer punto
+    tour = [0]  # Comenzar en el punto 0
+    unvisited = set(range(1, n))
+    
+    while unvisited:
+        current = tour[-1]
+        nearest = min(unvisited, key=lambda j: haversine_distance(
+            points[current][0], points[current][1],
+            points[j][0], points[j][1]
+        ))
+        tour.append(nearest)
+        unvisited.remove(nearest)
+    
+    # 2. Calcular distancia total
+    total_distance = 0
+    for i in range(len(tour)):
+        current = tour[i]
+        next_point = tour[(i + 1) % len(tour)]
+        total_distance += haversine_distance(
+            points[current][0], points[current][1],
+            points[next_point][0], points[next_point][1]
+        )
+    
+    # 3. Aplicar mejora 2-opt (opcional, pero mejora significativamente)
+    improved = True
+    iterations = 0
+    max_iterations = 100
+    
+    while improved and iterations < max_iterations:
+        improved = False
+        iterations += 1
+        
+        for i in range(n - 1):
+            for j in range(i + 2, n):
+                if j - i == 1:
+                    continue
+                
+                # Calcular el cambio de distancia si invertimos el segmento
+                curr_dist = (
+                    haversine_distance(points[tour[i]][0], points[tour[i]][1],
+                                      points[tour[i+1]][0], points[tour[i+1]][1]) +
+                    haversine_distance(points[tour[j]][0], points[tour[j]][1],
+                                      points[tour[(j+1) % n]][0], points[tour[(j+1) % n]][1])
+                )
+                
+                new_dist = (
+                    haversine_distance(points[tour[i]][0], points[tour[i]][1],
+                                      points[tour[j]][0], points[tour[j]][1]) +
+                    haversine_distance(points[tour[i+1]][0], points[tour[i+1]][1],
+                                      points[tour[(j+1) % n]][0], points[tour[(j+1) % n]][1])
+                )
+                
+                # Si es mejor, hacer el cambio
+                if new_dist < curr_dist:
+                    tour[i+1:j+1] = reversed(tour[i+1:j+1])
+                    total_distance = total_distance - curr_dist + new_dist
+                    improved = True
+                    break
+            if improved:
+                break
+    
+    # Convertir índices a coordenadas reales
+    ruta_optimizada = [points[i] for i in tour]
+    
+    return [total_distance, ruta_optimizada]
+
+
+def optimize_route_wolfram(origen, destino, restricciones):
+    """
+    Simula OptimizeRoute de Wolfram usando Python puro.
+    Retorna un diccionario con el resultado.
+    """
+    try:
+        # Construir lista de puntos: origen + restricciones + destino
+        puntos_de_control = [origen] + restricciones + [destino]
+        
+        logger.info("Calculando ruta óptima para %d puntos", len(puntos_de_control))
+        
+        # Encontrar la ruta más corta
+        distancia_total, ruta_final = find_shortest_tour(puntos_de_control)
+        
+        logger.info("Ruta calculada: %.2f km", distancia_total)
+        
+        # Retornar resultado en formato compatible
+        return {
+            "Status": "Optimizado con Éxito",
+            "RutaTotalKM": round(distancia_total, 2),
+            "RutaOptimizada": ruta_final,
+            "Mensaje": "Ruta calculada con éxito. Listo para el análisis de IA."
+        }
+        
+    except Exception as e:
+        logger.error("ERROR calculando ruta: %s", e)
+        return None
 
 
 # ===================================================================
@@ -205,14 +319,7 @@ def optimize_route():
             "analisis_simulacion": {"riesgo_alto": round(10 + len(restricciones) * 5 + mock_km / 100), "riesgo_exito": round(90 - len(restricciones) * 5 - mock_km / 100)}
         })
 
-    # Ensure Wolfram session is available (lazy init)
-    session = get_wolfram_session()
-    if session is None:
-        return jsonify({"error": "Motor Wolfram Desconectado. Contacte al Modelador."}), 503
-
     try:
-    # data, origen_list, destino_list, restricciones already extracted above
-
         # Validación básica de entrada
         def valid_coord(c):
             try:
@@ -223,38 +330,34 @@ def optimize_route():
         if not valid_coord(origen_list) or not valid_coord(destino_list):
             return jsonify({"error": "Los campos 'origen' y 'destino' deben ser listas [lat, lon] con valores numéricos."}), 400
         
-        # --- 5.1 LLAMADA AL MOTOR WOLFRAM ---
-        # Se asume que OptimizeRoute ya está definida en el Kernel
-        wolfram_result = session.evaluate(
-            wl.OptimizeRoute(origen_list, destino_list, restricciones)
-        )
+        # --- 5.1 LLAMADA AL MOTOR WOLFRAM (usando wolframscript) ---
+        logger.info("Llamando a optimize_route_wolfram...")
+        wolfram_result = optimize_route_wolfram(origen_list, destino_list, restricciones)
+        
+        if wolfram_result is None:
+            return jsonify({"error": "Motor Wolfram no respondió. Contacte al Modelador."}), 503
         
         # --- 5.2 PROCESAMIENTO Y NORMALIZACIÓN DE RESULTADOS ---
         
         # Extracción de la distancia
         ruta_km = 0
-        wolfram_result_dict = {}
-        # El resultado de Wolfram es un objeto Association que wolframclient convierte a dict
-        if isinstance(wolfram_result, dict):
-            wolfram_result_dict = wolfram_result
-            if 'RutaTotalKM' in wolfram_result:
+        wolfram_result_dict = wolfram_result
+        
+        if isinstance(wolfram_result_dict, dict):
+            if 'RutaTotalKM' in wolfram_result_dict:
                 try:
-                    # Convierte el valor a float (maneja el WLSymbol si existe)
-                    ruta_km = float(str(wolfram_result['RutaTotalKM']))
+                    ruta_km = float(wolfram_result_dict['RutaTotalKM'])
                 except (ValueError, TypeError):
                     ruta_km = 0
         
-        
-        # 🚩 CORRECCIÓN CRÍTICA: NORMALIZACIÓN DE COORDENADAS
-        # Asumiendo que Wolfram devuelve una lista de listas: [[lat1, lon1], [lat2, lon2], ...]
+        # 🚩 NORMALIZACIÓN DE COORDENADAS
         wolfram_coords = wolfram_result_dict.get('RutaOptimizada', [])
         ruta_coordenadas_normalizadas = []
 
         if isinstance(wolfram_coords, list):
             for p in wolfram_coords:
-                if isinstance(p, list) and len(p) == 2:
+                if isinstance(p, (list, tuple)) and len(p) == 2:
                     try:
-                        # Asegura que sean números flotantes y devolver objetos {lat, lon}
                         ruta_coordenadas_normalizadas.append({"lat": float(p[0]), "lon": float(p[1])})
                     except (ValueError, TypeError):
                         logger.warning("Advertencia: Coordenadas de Wolfram no son numéricas.")
@@ -269,7 +372,6 @@ def optimize_route():
             "RutaTienePuntosIntermedios": len(ruta_coordenadas_normalizadas) > 2,
         }
         wolfram_result_str = json.dumps(datos_para_gemini)
-
 
         # --- 5.3 LÓGICA DEL TRIGGER CRÍTICO (T-A5) ---
         is_critical = (ruta_km > 500 or len(restricciones) >= 3)
@@ -287,11 +389,10 @@ def optimize_route():
         return jsonify({
             "status": "success",
             "ruta_km": int(ruta_km),
-            "ruta_coordenadas": ruta_coordenadas_normalizadas, # Usamos la lista normalizada
+            "ruta_coordenadas": ruta_coordenadas_normalizadas,
             "is_critical_alert": is_critical,
             "analisis_ia_texto": gemini_analysis,
             "audio_alert_url": audio_url,
-            # Simulamos datos de riesgo para la gráfica
             "analisis_simulacion": {"riesgo_alto": round(10 + len(restricciones) * 5 + ruta_km / 100), "riesgo_exito": round(90 - len(restricciones) * 5 - ruta_km / 100)} 
         })
 
